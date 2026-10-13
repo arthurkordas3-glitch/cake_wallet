@@ -7,6 +7,9 @@ permissions:
 env:
   CW_DOCKER_REGISTRY: ghcr.io/cake-tech/cake_wallet
   CW_DOCKER_USE_CLOUD: "true"
+defaults:
+  run:
+    shell: bash
 jobs:
   app:
     runs-on: ubuntu-24.04
