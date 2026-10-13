@@ -1,0 +1,122 @@
+name: Callback Test APK
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+env:
+  CW_DOCKER_REGISTRY: ghcr.io/cake-tech/cake_wallet
+  CW_DOCKER_USE_CLOUD: "true"
+jobs:
+  app:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    container:
+      image: ghcr.io/cake-tech/cake_wallet:debian13-flutter3.41.9-ndkr28-go1.24.1-ruststablenightly
+      env:
+        STORE_PASS: test@cake_wallet
+        KEY_PASS: test@cake_wallet
+        BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+    steps:
+      - name: Fix github actions messing up $HOME...
+        run: "echo HOME=/root | sudo tee -a $GITHUB_ENV"
+      - uses: actions/checkout@v4
+        if: ${{ env.ACT != 'true' }}
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Docker sock permissions
+        run: sudo chmod 666 /var/run/docker.sock || true
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get the full commit message
+        run: |
+          FULL_MESSAGE="$(git log -1 --pretty=%B)"
+          echo "message<<EOF" >> $GITHUB_ENV
+          echo "$FULL_MESSAGE" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Generate KeyStore
+        run: |
+          ./scripts/android/generate_dev_keystore.sh android/app/key.jks
+
+      - name: Extract native dependencies
+        run: ./scripts/android/docker/build.sh --extract
+
+      - name: Execute Build and Setup Commands
+        run: |
+          pushd scripts/android
+            source ./app_env.sh cakewallet
+            export GITHUB_HUH=yeah
+            ./app_config.sh
+          popd
+
+      - name: Install Flutter dependencies
+        run: |
+          flutter pub get
+
+      - name: Generate independent test configuration
+        run: dart run tool/generate_new_secrets.dart
+
+      - name: Build generated code
+        run: |
+          ./model_generator.sh
+
+      - name: Generate key properties
+        run: |
+          dart run tool/generate_android_key_properties.dart keyAlias=testKey storeFile=key.jks storePassword=$STORE_PASS keyPassword=$KEY_PASS
+
+      - name: Generate localization
+        run: |
+          dart run tool/generate_localization.dart
+
+      - name: Compile graphics
+        run: |
+          ./compile_graphics.sh
+
+      - name: Rename app
+        run: |
+          sanitized_branch_name=${BRANCH_NAME#origin/}  # Remove 'origin/' prefix if it exists
+          sanitized_branch_name=${sanitized_branch_name:0:16}  # Take only the first 16 characters
+          sanitized_branch_name=$(echo "$sanitized_branch_name" | tr '[:upper:]' '[:lower:]')  # Convert to lowercase
+          sanitized_branch_name=$(echo "$sanitized_branch_name" | sed 's/[^a-z0-9]//g')  # Remove all special characters
+
+          echo -e "id=com.cakewallet.test_${sanitized_branch_name}\nname=${BRANCH_NAME}" > android/app.properties
+
+      - name: Replace email address
+        run: |
+          PATTERN1="support@cakewallet.com"
+          PATTERN1REP="dev.testflight.cakewallet@mrcyjanek.net"
+          echo lib/utils/exception_handler.dart \
+            lib/view_model/support_view_model.dart \
+            | while IFS= read -r -d '' file; do
+              sed -i.bak \
+                  -e "s|$PATTERN1|$PATTERN1REP|g" \
+                  "$file"
+          done
+
+      - name: Build
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION"
+          export ANDROID_NDK="$ANDROID_NDK_HOME"
+          pushd $ANDROID_SDK_ROOT/ndk
+            ln -s 28.2.13676358 25.1.8937393
+          popd
+          flutter build apk --dart-define=hasDevOptions=true \
+            --dart-define=CI_COMMIT="$(git rev-parse HEAD)" \
+            --dart-define=CI_BRANCH="$BRANCH_NAME" \
+            --release --split-per-abi
+
+
+      - name: Upload ARM64 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cake-callback-arm64
+          path: build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          if-no-files-found: error
